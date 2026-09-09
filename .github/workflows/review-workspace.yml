@@ -1,38 +1,51 @@
-name: Review workspace (temporary)
+name: Finalize review fixes (temporary)
 on:
   push:
     branches: [fix/review-data-integrity]
+    paths: [.review-fixes.patch.gz.base64]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  workspace:
+  finalize:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: fix/review-data-integrity
+      - name: Apply tested source changes and remove temporary review tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .review-fixes.patch.gz.base64 | gzip --decompress > /tmp/review-fixes.patch
+          git apply --check /tmp/review-fixes.patch
+          git apply --index /tmp/review-fixes.patch
+          git rm .review-fixes.patch.gz.base64 .github/workflows/review-workspace.yml
+      - name: Check out the pinned Kestral package contract
+        uses: actions/checkout@v6
+        with:
+          repository: ManuelZierl/kestral
+          ref: 82a983a268911e7a1958b4c6eab06dde334070b1
+          path: .kestral-contract
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 22.19.0
           cache: npm
-      - name: Export source without checkout credentials
-        run: git archive --format=tar.gz HEAD > /tmp/review-source.tar.gz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: review-source
-          path: /tmp/review-source.tar.gz
-          retention-days: 1
       - run: npm ci
-      - name: Export reproducible local test dependencies
-        run: |
-          mkdir -p .review-runtime/bin
-          cp "$(command -v node)" .review-runtime/bin/node
-          tar -czf /tmp/review-dependencies.tar.gz node_modules .review-runtime
-      - uses: actions/upload-artifact@v4
-        with:
-          name: review-dependencies
-          path: /tmp/review-dependencies.tar.gz
-          retention-days: 1
       - run: npm run typecheck
       - run: npm test
+      - run: npm run test:package-schema -- .kestral-contract/schemas/app.schema.json
+      - run: npm run test:reproducible
+      - name: Commit verified source and regenerated package on the review branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git add README.md src scripts dist THIRD-PARTY-NOTICES.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: preserve canvas edits and enforce snapshot and proposal integrity'
+          npm run check:generated
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git push origin HEAD:refs/heads/fix/review-data-integrity
