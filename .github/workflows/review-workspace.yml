@@ -1,0 +1,38 @@
+name: Review workspace (temporary)
+on:
+  push:
+    branches: [fix/review-data-integrity]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Export source without checkout credentials
+        run: git archive --format=tar.gz HEAD > /tmp/review-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-source
+          path: /tmp/review-source.tar.gz
+          retention-days: 1
+      - run: npm ci
+      - name: Export reproducible local test dependencies
+        run: |
+          mkdir -p .review-runtime/bin
+          cp "$(command -v node)" .review-runtime/bin/node
+          tar -czf /tmp/review-dependencies.tar.gz node_modules .review-runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-dependencies
+          path: /tmp/review-dependencies.tar.gz
+          retention-days: 1
+      - run: npm run typecheck
+      - run: npm test
