@@ -400,9 +400,15 @@
                             }
                           },
                           "frame_id": {
-                            "type": [
-                              "string",
-                              "null"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
                             ]
                           }
                         }
@@ -854,9 +860,15 @@
                             }
                           },
                           "frame_id": {
-                            "type": [
-                              "string",
-                              "null"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
                             ]
                           }
                         }
@@ -1314,9 +1326,15 @@
                             }
                           },
                           "frame_id": {
-                            "type": [
-                              "string",
-                              "null"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
                             ]
                           }
                         }
@@ -1914,9 +1932,15 @@
                         }
                       },
                       "frame_id": {
-                        "type": [
-                          "string",
-                          "null"
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512
+                          },
+                          {
+                            "type": "null"
+                          }
                         ]
                       }
                     }
@@ -1970,7 +1994,7 @@
   "integrity": {
     "algorithm": "sha256",
     "assets": {
-      "ui/index.html": "sha256-00cd49ad9e2a25ac29b020f3ddd3a80b4e2ed8a28c0f2bae26328d8d85207634",
+      "ui/index.html": "sha256-b1e1f9a5735bf87ccd135828451b31fceb048c2193f5843cbef3e078e8f23155",
       "ui/LICENSE": "sha256-e1bfa23458196b672de194e91d149031aa42410d8a08a28ce51f6625b90cb48c",
       "ui/THIRD-PARTY-NOTICES.txt": "sha256-ae57c8ab99b17cfc53f19fe72a80da8d25051f06029632ab42c094919f8708e0"
     }

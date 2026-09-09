@@ -11,7 +11,8 @@ application.
   state, frontend-derived summary/search projection, schema version, and bounded
   applied-proposal receipts; opaque content owns the complete scene and assets.
 - Create, rename, duplicate, trash, restore, purge, autosave, stale-load
-  suppression, CAS conflict recovery, and **Keep mine as copy**.
+  suppression, CAS conflict recovery, and **Keep mine as copy**. Conflict copies save the complete scene in one
+  document create; copy names are bounded by UTF-8 bytes without splitting code points.
 - Restores the last active canvas and each canvas's zoom and pan position from
   private, revisioned surface state. View changes are saved independently from
   durable scene content and never make a canvas document dirty.
@@ -43,7 +44,10 @@ Metadata-only rename/trash/restore/rejection uses `update-metadata` and does
 not reupload scene content. Scene changes use staged `create` or `replace`.
 `src/surfaceState.ts` separately uses `getState` and `putState` with CAS
 revisions for the active canvas and whitelisted camera fields. Canvas documents
-explicitly exclude `scrollX`, `scrollY`, and `zoom`.
+explicitly exclude `scrollX`, `scrollY`, and `zoom`. Each independent read starts
+a fresh snapshot; only its related reads/chunks share the captured generation.
+Writes acquire a fresh generation without replacing the expected document
+revision, so unrelated writes do not permanently block refresh or autosave.
 
 Kestral owns the document store and surface-state persistence. The app receives
 only the host bridge exposed to its sandboxed surface; it cannot read host
@@ -64,7 +68,12 @@ and **Reject**. The frontend validates the complete envelope and strict bounded
 semantic payload. Apply and reject use document CAS. Applied or rejected
 proposal IDs are recorded in bounded document metadata receipts, preventing
 replay. Malformed, stale, missing-target, and already-receipted proposals are
-refused visibly.
+refused visibly. Pending manual edits are saved before a proposal decision;
+that save can make a proposal stale rather than silently rebasing it. A proposal
+must still match both its target revision and host generation at commit time.
+Receipt storage is limited to 32 decisions per canvas and fails closed at that
+bound; old receipts are never evicted to make replay possible. Copying a canvas
+creates a new target identity and a fresh receipt history.
 
 Chat's only declared access is an approval-required request to create a
 reviewable proposal artifact. Chat cannot directly mutate a canvas. The

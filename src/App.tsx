@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   type CanvasMeta,
 } from "./canvasApi";
-import { CanvasRepository } from "./canvasApi";
-import { createDataV2Adapter } from "./dataV2Adapter";
+import { CanvasRepository, deriveCopyTitle } from "./canvasApi";
+import { createDataV2Adapter, MAX_TITLE_BYTES } from "./dataV2Adapter";
 import { validateProposalArtifact, type CanvasProposal } from "./proposals";
 import {
   createBoardDocument,
@@ -33,13 +33,28 @@ interface LoadedScene {
 }
 
 const host = window.appHost;
-let repository: CanvasRepository | null = null;
 const PREVIEW_ID = "00000000-0000-4000-8000-000000000000";
 const AUTOSAVE_DELAY_MS = 750;
 const VIEWPORT_SAVE_DELAY_MS = 350;
 
 export default function App() {
-  const [canvases, setCanvases] = useState<CanvasMeta[]>([]);
+  const [canvases, renderCanvases] = useState<CanvasMeta[]>([]);
+  const canvasesRef = useRef<CanvasMeta[]>([]);
+  const repositoryRef = useRef<CanvasRepository | null>(null);
+  const actionBusyRef = useRef(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const proposalRefreshGenerationRef = useRef(0);
+
+  function setCanvases(next: CanvasMeta[] | ((items: CanvasMeta[]) => CanvasMeta[])) {
+    const items = typeof next === "function" ? next(canvasesRef.current) : next;
+    canvasesRef.current = items;
+    renderCanvases(items);
+  }
+
+  function requireRepository(): CanvasRepository {
+    if (!repositoryRef.current) throw new Error("Kestral data.v2 is unavailable in this surface.");
+    return repositoryRef.current;
+  }
   const [current, setCurrent] = useState<CanvasMeta | null>(null);
   const [loadedScene, setLoadedScene] = useState<LoadedScene | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("clean");
@@ -74,6 +89,7 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    let started = false;
     disposedRef.current = false;
 
     async function start() {
@@ -89,7 +105,7 @@ export default function App() {
       try {
         const data = createDataV2Adapter(host);
         if (!data) throw new Error("Kestral data.v2 is unavailable in this surface.");
-        repository = new CanvasRepository(data);
+        repositoryRef.current = new CanvasRepository(data);
         surfaceStateRef.current = new CanvasSurfaceState(host);
         let preferredCanvasId: string | null = null;
         let viewRestoreFailed = false;
@@ -99,10 +115,10 @@ export default function App() {
           viewRestoreFailed = true;
           host.reportError(`Could not restore the previous Whiteboard canvas: ${errorMessage(error)}`);
         }
+        if (!active) return;
         const listed = await fetchAllCanvases();
         if (!active) return;
         setCanvases(listed);
-        await refreshProposals(listed);
         const first = listed.find((canvas) => canvas.id === preferredCanvasId && canvas.trashed_at === null)
           ?? listed.find((canvas) => canvas.trashed_at === null);
         if (first) {
@@ -110,6 +126,8 @@ export default function App() {
         } else {
           await createCanvas("Untitled canvas");
         }
+        if (!active) return;
+        await refreshProposals();
         if (viewRestoreFailed) setStatus("Canvas opened, but its previous view could not be restored.");
       } catch (error) {
         reportFailure("Whiteboard unavailable", error);
@@ -118,12 +136,14 @@ export default function App() {
 
     if (host) {
       host.onInit((context) => {
+        if (!active) return;
         setTheme(context.theme === "dark" ? "dark" : "light");
+        if (started) return;
+        started = true;
         void start();
       });
       host.onEvent(() => {
-        void refreshFromHost();
-        void refreshProposals();
+        if (active) void refreshFromHost();
       });
       host.ready();
     } else {
@@ -138,7 +158,6 @@ export default function App() {
     const refreshOnFocus = () => {
       if (document.visibilityState === "visible") {
         void refreshFromHost();
-        void refreshProposals();
       }
     };
     window.addEventListener("focus", refreshOnFocus);
@@ -154,18 +173,22 @@ export default function App() {
       clearViewportTimer();
       pendingViewportRef.current = null;
       openGenerationRef.current += 1;
+      proposalRefreshGenerationRef.current += 1;
     };
   }, []);
 
   async function fetchAllCanvases(): Promise<CanvasMeta[]> {
+    const repository = repositoryRef.current;
     if (!repository) return [previewCanvas()];
     return repository.listCanvases();
   }
 
-  async function refreshProposals(listed = canvases) {
-    if (!host) return;
+  async function refreshProposals(listed = canvasesRef.current) {
+    if (!host || disposedRef.current) return;
+    const generation = ++proposalRefreshGenerationRef.current;
     try {
       const artifacts = await host.listArtifacts();
+      if (disposedRef.current || generation !== proposalRefreshGenerationRef.current) return;
       const valid: CanvasProposal[] = [];
       for (const artifact of artifacts) {
         if (artifact.artifact_type !== "canvas-operations-proposal") continue;
@@ -180,17 +203,20 @@ export default function App() {
       }
       setPendingProposals(valid);
     } catch (error) {
+      if (disposedRef.current || generation !== proposalRefreshGenerationRef.current) return;
       reportFailure("Proposal refresh failed", error);
     }
   }
 
   async function refreshFromHost() {
-    if (!repository || refreshingRef.current || readSaveState() === "saving") return;
+    const repository = repositoryRef.current;
+    if (!repository || disposedRef.current || refreshingRef.current || actionBusyRef.current || conflictRecoveryRef.current || readSaveState() === "saving") return;
     refreshingRef.current = true;
     const selectedBeforeRefresh = currentRef.current;
     const openGeneration = openGenerationRef.current;
     try {
       const listed = await fetchAllCanvases();
+      if (disposedRef.current || actionBusyRef.current || conflictRecoveryRef.current) return;
       const selectedAfterRefresh = currentRef.current;
       setCanvases(listed.map((canvas) => {
         return selectedAfterRefresh?.id === canvas.id && selectedAfterRefresh.revision > canvas.revision
@@ -199,6 +225,7 @@ export default function App() {
       }));
       await refreshProposals(listed);
       if (
+        disposedRef.current || actionBusyRef.current || conflictRecoveryRef.current ||
         openGenerationRef.current !== openGeneration ||
         selectedBeforeRefresh?.id !== selectedAfterRefresh?.id ||
         selectedBeforeRefresh?.revision !== selectedAfterRefresh?.revision
@@ -250,8 +277,11 @@ export default function App() {
   }
 
   async function openCanvas(id: string): Promise<boolean> {
+    const repository = repositoryRef.current;
     if (!repository) return false;
     const generation = ++openGenerationRef.current;
+    const selectedAtStart = currentRef.current;
+    const fingerprintAtStart = documentFingerprintRef.current;
     await flushViewport();
     if (generation !== openGenerationRef.current) return false;
     clearAutosaveTimer();
@@ -259,6 +289,7 @@ export default function App() {
     try {
       const result = await repository.loadCanvas(id);
       if (!result) throw new Error("Canvas no longer exists.");
+      if (result.trashed_at !== null) throw new Error("Canvas is in trash.");
       const scene = parseBoardDocument(result.scene);
       let viewport: CanvasViewport | null = null;
       let viewRestoreFailed = false;
@@ -269,6 +300,11 @@ export default function App() {
         host?.reportError(`Could not restore the view for ${result.title}: ${errorMessage(error)}`);
       }
       if (generation !== openGenerationRef.current) return false;
+      if (currentRef.current?.id !== selectedAtStart?.id || currentRef.current?.revision !== selectedAtStart?.revision || documentFingerprintRef.current !== fingerprintAtStart) {
+        setStatus("Canvas changed while loading. Your latest editor state was kept.");
+        if (readSaveState() === "dirty") scheduleAutosave();
+        return false;
+      }
       const fingerprint = documentFingerprint(scene);
       editorInitializedRef.current = false;
       documentRef.current = scene;
@@ -301,7 +337,14 @@ export default function App() {
     documentRef.current = nextDocument;
     documentFingerprintRef.current = nextFingerprint;
     if (!editorInitializedRef.current) return;
-    if (!changed || nextFingerprint === savedFingerprintRef.current) return;
+    if (!changed) return;
+    if (nextFingerprint === savedFingerprintRef.current) {
+      if (saveStateRef.current !== "saving") {
+        clearAutosaveTimer();
+        updateSaveState("clean");
+      }
+      return;
+    }
     if (saveStateRef.current !== "saving") updateSaveState("dirty");
     setStatus(host ? "Changes pending autosave..." : "Development preview: changes are not persisted.");
     scheduleAutosave();
@@ -365,10 +408,11 @@ export default function App() {
 
   async function saveCurrentDocument(): Promise<boolean> {
     clearAutosaveTimer();
+    const repository = repositoryRef.current;
     const selected = currentRef.current;
     const scene = documentRef.current;
     const savingFingerprint = documentFingerprintRef.current;
-    if (!host || !selected || !scene) return false;
+    if (!host || !repository || !selected || !scene) return false;
     if (!savingFingerprint || savingFingerprint === savedFingerprintRef.current) {
       updateSaveState("clean");
       return true;
@@ -376,8 +420,7 @@ export default function App() {
     updateSaveState("saving");
     setStatus("Saving...");
     try {
-      const result = await repository?.replaceCanvas(selected, scene);
-      if (!result) return false;
+      const result = await repository.replaceCanvas(selected, scene);
       if (result.outcome !== "applied" || !result.canvas) {
         if (currentRef.current?.id !== selected.id || currentRef.current.revision !== selected.revision) return false;
         updateSaveState("dirty");
@@ -423,9 +466,19 @@ export default function App() {
   }
 
   function runAfterAutosave(action: () => Promise<unknown>) {
+    if (actionBusyRef.current || conflictRecoveryRef.current) return;
+    actionBusyRef.current = true;
+    setActionBusy(true);
     void (async () => {
-      if (await flushChanges()) await action();
-    })().catch((error) => reportFailure("Whiteboard action failed", error));
+      try {
+        if (await flushChanges()) await action();
+      } catch (error) {
+        reportFailure("Whiteboard action failed", error);
+      } finally {
+        actionBusyRef.current = false;
+        if (!disposedRef.current) setActionBusy(false);
+      }
+    })();
   }
 
   function scheduleAutosave() {
@@ -476,7 +529,7 @@ export default function App() {
       setCurrent(result.canvas);
     }
     if (action === "trash") {
-      const fallback = canvases.find((item) => item.id !== canvas.id && item.trashed_at === null);
+      const fallback = canvasesRef.current.find((item) => item.id !== canvas.id && item.trashed_at === null);
       if (fallback) await openCanvas(fallback.id);
       else await createCanvas("Untitled canvas");
     }
@@ -502,26 +555,17 @@ export default function App() {
     if (!selected || !scene) return;
     conflictRecoveryRef.current = true;
     setConflictRecoveryBusy(true);
-    let blankCopy: CanvasMeta | null = null;
     try {
-      const created = await requireRepository().createCanvas(`${selected.title} (conflict copy)`);
-      blankCopy = created.canvas;
+      // Stage the actual work in the create itself; never leave an empty recovery copy.
+      const created = await requireRepository().createCanvas(deriveCopyTitle(selected.title, true), scene);
       setCanvases((items) => [...items.filter((item) => item.id !== created.canvas.id), created.canvas]);
-      if (currentRef.current?.id !== selected.id || documentFingerprintRef.current !== sceneFingerprint) {
-        throw new Error("The canvas changed while the conflict copy was being created. Try again to copy the latest edits.");
-      }
-      const replaced = await requireRepository().replaceCanvas(created.canvas, scene);
-      if (replaced.outcome !== "applied" || !replaced.canvas) throw new Error("Could not save the conflict copy.");
-      setCanvases((items) => [...items.filter((item) => item.id !== replaced.canvas!.id), replaced.canvas!]);
       if (currentRef.current?.id !== selected.id || documentFingerprintRef.current !== sceneFingerprint) {
         setStatus("Conflict copy saved. Newer edits remain on the current canvas.");
         return;
       }
-      await openCanvas(replaced.canvas.id);
+      await openCanvas(created.canvas.id);
     } catch (error) {
-      reportFailure(blankCopy
-        ? `Created blank canvas ${blankCopy.title}, but could not save your conflicting work into it`
-        : "Could not create a conflict copy", error);
+      reportFailure("Could not create a conflict copy", error);
     } finally {
       conflictRecoveryRef.current = false;
       setConflictRecoveryBusy(false);
@@ -545,6 +589,7 @@ export default function App() {
   async function reviewProposal(proposal: CanvasProposal, decision: "apply" | "reject") {
     if (proposalBusy) return;
     setProposalBusy(proposal.artifactId);
+    proposalRefreshGenerationRef.current += 1;
     try {
       const target = await requireRepository().getCanvasMeta(proposal.targetId);
       if (!target) throw new Error("The proposal target no longer exists.");
@@ -553,9 +598,17 @@ export default function App() {
         : await requireRepository().rejectProposal(target, proposal);
       if (result.outcome === "applied") {
         replaceMeta(result.canvas!);
+        proposalRefreshGenerationRef.current += 1;
         setPendingProposals((items) => items.filter((item) => item.artifactId !== proposal.artifactId));
+        if (currentRef.current?.id === target.id) {
+          if (decision === "apply" || currentRef.current.revision !== target.revision) {
+            await openCanvas(target.id);
+          } else {
+            currentRef.current = result.canvas;
+            setCurrent(result.canvas);
+          }
+        }
         setStatus(decision === "apply" ? "Proposal applied." : "Proposal rejected.");
-        if (decision === "apply" && currentRef.current?.id === target.id) await openCanvas(target.id);
       } else if (result.outcome === "replayed") {
         setPendingProposals((items) => items.filter((item) => item.artifactId !== proposal.artifactId));
         setStatus("Proposal was already recorded and was not replayed.");
@@ -660,7 +713,7 @@ export default function App() {
             {pendingProposals.map((proposal) => (
               <article className="proposal-card" key={proposal.artifactId}>
                 <div><strong>Review canvas proposal</strong><span>{canvases.find((canvas) => canvas.id === proposal.targetId)?.title ?? "Unknown canvas"}</span><small>Expected revision {proposal.targetRevision} · {proposal.operations.length} semantic operation{proposal.operations.length === 1 ? "" : "s"}</small></div>
-                <div className="proposal-actions"><button type="button" disabled={proposalBusy !== null} onClick={() => void reviewProposal(proposal, "apply")}>Apply</button><button type="button" className="secondary" disabled={proposalBusy !== null} onClick={() => void reviewProposal(proposal, "reject")}>Reject</button></div>
+                <div className="proposal-actions"><button type="button" disabled={proposalBusy !== null || actionBusy || conflictRecoveryBusy} onClick={() => runAfterAutosave(() => reviewProposal(proposal, "apply"))}>Apply</button><button type="button" className="secondary" disabled={proposalBusy !== null || actionBusy || conflictRecoveryBusy} onClick={() => runAfterAutosave(() => reviewProposal(proposal, "reject"))}>Reject</button></div>
               </article>
             ))}
           </section>
@@ -689,7 +742,7 @@ export default function App() {
               editorInitializedRef.current = true;
             });
           }}
-          viewModeEnabled={conflictRecoveryBusy}
+          viewModeEnabled={conflictRecoveryBusy || actionBusy || dialog !== null}
           theme={theme}
           UIOptions={{
             canvasActions: {
@@ -746,10 +799,11 @@ function WorkspaceDialog({
 
   if (state.kind === "title") {
     const trimmed = title.trim();
+    const tooLong = new TextEncoder().encode(trimmed).byteLength > MAX_TITLE_BYTES;
     return (
-      <Dialog title={state.mode === "create" ? "New canvas" : "Rename canvas"} detail="Canvas names can be changed later." failure={failure} closeDisabled={busy} onClose={() => setState(null)}>
+      <Dialog title={state.mode === "create" ? "New canvas" : "Rename canvas"} detail="Canvas names can be changed later." failure={tooLong ? `Canvas names must be at most ${MAX_TITLE_BYTES} UTF-8 bytes.` : failure} closeDisabled={busy} onClose={() => setState(null)}>
         <label className="title-field">Name<input autoFocus value={title} maxLength={120} onChange={(event) => setTitle(event.target.value)} /></label>
-        <button type="button" disabled={busy || !trimmed} onClick={() => void run(() => state.mode === "create" ? onCreate(trimmed) : onRename(state.canvas!, trimmed))}>{state.mode === "create" ? "Create canvas" : "Rename"}</button>
+        <button type="button" disabled={busy || !trimmed || tooLong} onClick={() => void run(() => state.mode === "create" ? onCreate(trimmed) : onRename(state.canvas!, trimmed))}>{state.mode === "create" ? "Create canvas" : "Rename"}</button>
       </Dialog>
     );
   }
@@ -861,11 +915,6 @@ function capitalize(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function requireRepository(): CanvasRepository {
-  if (!repository) throw new Error("Kestral data.v2 is unavailable in this surface.");
-  return repository;
 }
 
 function documentFingerprint(document: BoardDocument): string {

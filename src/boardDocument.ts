@@ -47,6 +47,23 @@ export function parseBoardDocument(value: unknown): BoardDocument {
   if (!isRecord(value.appState) || !isRecord(value.files)) {
     throw new Error("Saved board is missing Excalidraw state or files.");
   }
+  // Check the fields consumed by our summary/semantic layer before handing the
+  // opaque scene to Excalidraw. Preserve native fields rather than narrowing a
+  // freehand/image scene to the smaller semantic proposal vocabulary.
+  const ids = new Set<string>();
+  for (const element of value.elements) {
+    if (!isRecord(element) || typeof element.id !== "string" || !element.id || ids.has(element.id) ||
+        typeof element.type !== "string" || !element.type ||
+        ![element.x, element.y, element.width, element.height].every(finiteNumber) ||
+        (element.width as number) < 0 || (element.height as number) < 0 ||
+        ("isDeleted" in element && typeof element.isDeleted !== "boolean") ||
+        ("text" in element && typeof element.text !== "string") ||
+        ("points" in element && (!Array.isArray(element.points) || !element.points.every((point) =>
+          Array.isArray(point) && point.length === 2 && point.every(finiteNumber))))) {
+      throw new Error("Saved board contains an invalid or duplicate element.");
+    }
+    ids.add(element.id);
+  }
   return {
     ...(value as unknown as BoardDocument),
     appState: withoutViewport(value.appState as Partial<AppState>),
@@ -60,4 +77,8 @@ function withoutViewport(appState: Partial<AppState>): Partial<AppState> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }

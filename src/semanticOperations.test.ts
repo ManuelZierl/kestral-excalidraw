@@ -32,3 +32,29 @@ describe("frontend semantic canvas operations", () => {
     expect(scene.elements[0].text).toBe("Before");
   });
 });
+
+describe("strict semantic boundary", () => {
+  it.each([
+    { kind: "delete", id: "x", unexpected: true },
+    { kind: "group", ids: [] },
+    { kind: "group", ids: ["x", "x"] },
+    { kind: "group", ids: ["x"] },
+    { kind: "set-frame", ids: [], frame_id: null },
+    { kind: "update", id: "x", patch: { text: 123 } },
+    { kind: "update", id: "x", patch: { x: "12" } },
+    { kind: "update", id: "x", patch: { width: -1 } },
+    { kind: "update", id: "x", patch: { fillStyle: "unknown" } },
+    { kind: "add", element: { type: "text", text: 123 } },
+    { kind: "add", element: { type: "text", x: null } },
+  ])("rejects malformed operation %# during parsing", (operation) => {
+    expect(() => parseCanvasOperations([operation])).toThrow();
+  });
+
+  it("preserves every polyline point when resizing", () => {
+    const scene = createScene([{ type: "line", id: "line", width: 100, height: 60 }]);
+    scene.elements[0].points = [[0, 0], [50, 20], [100, 60]];
+    const result = applyCanvasOperations(scene, parseCanvasOperations([{ kind: "update", id: "line", patch: { width: 200, height: 120 } }]));
+    expect(result.scene.elements[0].points).toEqual([[0, 0], [100, 40], [200, 120]]);
+    expect(scene.elements[0].points).toEqual([[0, 0], [50, 20], [100, 60]]);
+  });
+});

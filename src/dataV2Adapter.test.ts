@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DataV2Adapter, MAX_CHUNK_BYTES, MAX_SCENE_BYTES, encodeDocument, type ManagedDocumentRecord } from "./dataV2Adapter";
+import { DataV2Adapter, DataV2ConflictError, MAX_CHUNK_BYTES, MAX_SCENE_BYTES, encodeDocument, type ManagedDocumentRecord } from "./dataV2Adapter";
 
 describe("data.v2 adapter", () => {
   it("uses the exact snapshot wire and reads bounded 7 MiB content", async () => {
@@ -38,6 +38,20 @@ describe("data.v2 adapter", () => {
     expect(loaded.byteLength).toBe(encoded.bytes.byteLength);
     expect(wire.readLengths.every((length) => length <= MAX_CHUNK_BYTES)).toBe(true);
   });
+
+  it("rejects a snapshot whose returned generation differs from the request", async () => {
+    const wire = new RecordingWire();
+    await expect(wire.adapter.listDocuments("canvases", 7)).rejects.toBeInstanceOf(DataV2ConflictError);
+    await expect(wire.adapter.getDocument("canvases", "id", 7)).rejects.toBeInstanceOf(DataV2ConflictError);
+  });
+
+  it("rejects chunks attributed to another document revision even when their bytes match", async () => {
+    const encoded = await encodeDocument({ elements: [] });
+    const wire = new RecordingWire(encoded.bytes, encoded.contentSha256);
+    const selected: ManagedDocumentRecord = { id: "00000000-0000-4000-8000-000000000001", revision: 3, createdAt: "", updatedAt: "", metadata: {}, contentLength: encoded.bytes.length, contentSha256: encoded.contentSha256 };
+    await expect(wire.adapter.readDocument("canvases", selected, 1)).rejects.toThrow(/chunk/);
+  });
+
 });
 
 class RecordingWire {
