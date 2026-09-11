@@ -17,7 +17,7 @@ export class FakeDataV2 {
   beforeRead: ((request: any) => Promise<void>) | null = null;
   afterRead: ((request: any) => Promise<void>) | null = null;
   beforeCommit: (() => Promise<void>) | null = null;
-  events: Array<() => void> = [];
+  afterCommit: (() => Promise<void>) | null = null;
   artifacts: any[] | null = null;
   private cachedProposal: any = null;
   private init: ((context: { theme: "light" | "dark" | null; variables: Record<string, string> }) => void) | null = null;
@@ -43,7 +43,7 @@ export class FakeDataV2 {
       abortBatch: async () => {},
     };
     this.host = {
-      theme: "light", variables: {}, ready: () => this.init?.({ theme: "light", variables: {} }), reportError: vi.fn(), onInit: (callback: (context: { theme: "light" | "dark" | null; variables: Record<string, string> }) => void) => { this.init = callback; }, onEvent: (callback: () => void) => { this.events.push(callback); },
+      theme: "light", variables: {}, ready: () => this.init?.({ theme: "light", variables: {} }), reportError: vi.fn(), onInit: (callback: (context: { theme: "light" | "dark" | null; variables: Record<string, string> }) => void) => { this.init = callback; }, onEvent: () => {},
       invoke: async () => ({}), invokeScoped: async () => ({}), listArtifacts: async () => this.artifacts ?? (this.proposalEnabled && this.documents.size ? [this.cachedProposal ??= this.proposal()] : []), data: { v2: wire },
       getState: async (key: string) => structuredClone(this.state.get(key) ?? { revision: 0, value: null }),
       putState: async (key: string, expectedRevision: number, value: Record<string, unknown> | null) => {
@@ -126,6 +126,7 @@ export class FakeDataV2 {
     this.generation += 1;
     const result = { generation: this.generation, records: [], documents: touched };
     this.commits.push(result);
+    await this.afterCommit?.();
     return result;
   }
 }

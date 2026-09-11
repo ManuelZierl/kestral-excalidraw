@@ -78,6 +78,7 @@ export default function App() {
   const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const openGenerationRef = useRef(0);
   const refreshingRef = useRef(false);
+  const refreshPendingRef = useRef(false);
   const conflictRecoveryRef = useRef(false);
   const [conflictRecoveryBusy, setConflictRecoveryBusy] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<CanvasProposal[]>([]);
@@ -142,9 +143,6 @@ export default function App() {
         started = true;
         void start();
       });
-      host.onEvent(() => {
-        if (active) void refreshFromHost();
-      });
       host.ready();
     } else {
       void start();
@@ -172,6 +170,7 @@ export default function App() {
       clearAutosaveTimer();
       clearViewportTimer();
       pendingViewportRef.current = null;
+      refreshPendingRef.current = false;
       openGenerationRef.current += 1;
       proposalRefreshGenerationRef.current += 1;
     };
@@ -210,13 +209,20 @@ export default function App() {
 
   async function refreshFromHost() {
     const repository = repositoryRef.current;
-    if (!repository || disposedRef.current || refreshingRef.current || actionBusyRef.current || conflictRecoveryRef.current || readSaveState() === "saving") return;
+    if (!repository || disposedRef.current) return;
+    refreshPendingRef.current = true;
+    if (refreshingRef.current || actionBusyRef.current || conflictRecoveryRef.current || readSaveState() === "saving") return;
+    refreshPendingRef.current = false;
     refreshingRef.current = true;
     const selectedBeforeRefresh = currentRef.current;
     const openGeneration = openGenerationRef.current;
     try {
       const listed = await fetchAllCanvases();
-      if (disposedRef.current || actionBusyRef.current || conflictRecoveryRef.current) return;
+      if (disposedRef.current) return;
+      if (actionBusyRef.current || conflictRecoveryRef.current) {
+        refreshPendingRef.current = true;
+        return;
+      }
       const selectedAfterRefresh = currentRef.current;
       setCanvases(listed.map((canvas) => {
         return selectedAfterRefresh?.id === canvas.id && selectedAfterRefresh.revision > canvas.revision
@@ -229,14 +235,20 @@ export default function App() {
         openGenerationRef.current !== openGeneration ||
         selectedBeforeRefresh?.id !== selectedAfterRefresh?.id ||
         selectedBeforeRefresh?.revision !== selectedAfterRefresh?.revision
-      ) return;
+      ) {
+        if (actionBusyRef.current || conflictRecoveryRef.current) refreshPendingRef.current = true;
+        return;
+      }
       const selected = currentRef.current;
       if (!selected) return;
       const latest = listed.find((canvas) => canvas.id === selected.id);
       if (!latest) {
         const refreshSaveState = readSaveState();
         if (refreshSaveState !== "clean") {
-          if (refreshSaveState === "saving") return;
+          if (refreshSaveState === "saving") {
+            refreshPendingRef.current = true;
+            return;
+          }
           setExternalConflict(null);
           setStatus("This canvas was removed elsewhere. Keep your work as a copy or discard it.");
         } else {
@@ -249,7 +261,10 @@ export default function App() {
       if (latest.trashed_at !== null) {
         const refreshSaveState = readSaveState();
         if (refreshSaveState !== "clean") {
-          if (refreshSaveState === "saving") return;
+          if (refreshSaveState === "saving") {
+            refreshPendingRef.current = true;
+            return;
+          }
           setExternalConflict(null);
           setStatus("This canvas was moved to trash elsewhere. Keep your work as a copy or discard it.");
         } else {
@@ -263,7 +278,10 @@ export default function App() {
       if (latest.revision === selected.revision) return;
       const refreshSaveState = readSaveState();
       if (refreshSaveState !== "clean") {
-        if (refreshSaveState === "saving") return;
+        if (refreshSaveState === "saving") {
+          refreshPendingRef.current = true;
+          return;
+        }
         setExternalConflict(latest);
         setStatus("This canvas changed elsewhere. Your unsaved work has not been overwritten.");
       } else {
@@ -273,7 +291,12 @@ export default function App() {
       reportFailure("Refresh failed", error);
     } finally {
       refreshingRef.current = false;
+      resumePendingHostRefresh();
     }
+  }
+
+  function resumePendingHostRefresh() {
+    if (refreshPendingRef.current && !disposedRef.current) void refreshFromHost();
   }
 
   async function openCanvas(id: string): Promise<boolean> {
@@ -403,6 +426,7 @@ export default function App() {
       return await operation;
     } finally {
       if (saveInFlightRef.current === operation) saveInFlightRef.current = null;
+      resumePendingHostRefresh();
     }
   }
 
@@ -477,6 +501,7 @@ export default function App() {
       } finally {
         actionBusyRef.current = false;
         if (!disposedRef.current) setActionBusy(false);
+        resumePendingHostRefresh();
       }
     })();
   }
@@ -569,6 +594,7 @@ export default function App() {
     } finally {
       conflictRecoveryRef.current = false;
       setConflictRecoveryBusy(false);
+      resumePendingHostRefresh();
     }
   }
 
@@ -583,6 +609,7 @@ export default function App() {
     } finally {
       conflictRecoveryRef.current = false;
       setConflictRecoveryBusy(false);
+      resumePendingHostRefresh();
     }
   }
 

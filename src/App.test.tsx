@@ -186,9 +186,31 @@ describe("whiteboard edit and refresh races", () => {
     fake.documents.get(uuid(1)).metadata.title = "External title";
     fake.documents.get(uuid(1)).revision += 1;
     fake.generation += 1;
-    await act(async () => { fake.events.forEach((callback) => callback()); });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
     await vi.waitFor(() => expect(screen.getByRole("button", { name: /External title.*r2/ })).toBeTruthy());
     expect(fake.host.reportError).not.toHaveBeenCalled();
+  });
+
+  it("applies a focus refresh received while a save is settling", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    const saveSettled = deferred();
+    fake.afterCommit = async () => saveSettled.promise;
+    await mount(fake);
+    vi.useFakeTimers();
+
+    fireEvent.click(screen.getByRole("button", { name: "Make dirty" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await vi.waitFor(() => expect(fake.commits).toHaveLength(1));
+
+    fake.documents.get(uuid(1)).metadata.title = "External title";
+    fake.documents.get(uuid(1)).revision += 1;
+    fake.generation += 1;
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    saveSettled.resolve();
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /External title.*r3/ })).toBeTruthy());
+    expect(screen.getByRole("status").textContent).not.toContain("Saving");
   });
 
   it("does not discard edits made while another canvas is loading", async () => {
@@ -227,18 +249,18 @@ describe("whiteboard edit and refresh races", () => {
     await vi.waitFor(() => expect(screen.getByTestId("scene-id").textContent).toBe("changed"));
   });
 
-  it("retains proposal cards after host events and does not resurrect a rejected card from an old refresh", async () => {
+  it("retains proposal cards after focus refreshes and does not resurrect a rejected card from an old refresh", async () => {
     const fake = new FakeDataV2();
     await fake.seedCanvas(uuid(1), "First", "original");
     fake.proposalEnabled = true;
     await mount(fake);
     await screen.findByText("Review canvas proposal");
-    await act(async () => { fake.events.forEach((callback) => callback()); });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
     expect(screen.getByText("Review canvas proposal")).toBeTruthy();
     const artifacts = await fake.host.listArtifacts();
     const pending = deferred<typeof artifacts>();
     fake.host.listArtifacts = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue(artifacts);
-    await act(async () => { fake.events.forEach((callback) => callback()); });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
     await vi.waitFor(() => expect(fake.host.listArtifacts).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Reject" }));
     await vi.waitFor(() => expect(screen.queryByText("Review canvas proposal")).toBeNull());
@@ -256,7 +278,11 @@ describe("whiteboard edit and refresh races", () => {
     expect(fake.documents.size).toBe(1);
     mounted.unmount();
     const reads = fake.reads.length;
-    await act(async () => { fake.events.forEach((callback) => callback()); fake.host.ready(); });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      fake.host.ready();
+    });
     expect(fake.reads).toHaveLength(reads);
     expect(fake.documents.size).toBe(1);
   });

@@ -1,6 +1,6 @@
 {
   "name": "kestral-excalidraw",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -32,6 +32,7 @@
     "@types/react-dom": "18.3.7",
     "ajv": "8.20.0",
     "jsdom": "29.1.1",
+    "nanoid": "3.3.18",
     "typescript": "7.0.2",
     "vite": "8.1.5",
     "vite-plugin-singlefile": "2.3.3",
@@ -39,11 +40,15 @@
   },
   "overrides": {
     "@excalidraw/excalidraw": {
-      "nanoid": "3.3.8"
+      "nanoid": "3.3.18"
     },
     "@excalidraw/mermaid-to-excalidraw": {
-      "nanoid": "5.0.9"
+      "nanoid": "5.1.16",
+      "mermaid": "11.16.1"
     },
-    "lodash-es": "4.18.1"
+    "dompurify": "3.4.15",
+    "fast-uri": "3.1.6",
+    "lodash-es": "4.18.1",
+    "nanoid@<=3.3.17": "3.3.18"
   }
 }

@@ -50,10 +50,10 @@ test("creates evidence for the exact app without imposing a generic backend rule
   const root = await mkdtemp(join(tmpdir(), "kestral-excalidraw-release-evidence-"));
   await mkdir(join(root, "dist", "ui"), { recursive: true });
   await writeFile(join(root, "dist", "ui", "index.html"), "<!doctype html>\n");
-  await writeFile(join(root, "package.json"), JSON.stringify({ name: "kestral-excalidraw", version: "0.1.3" }));
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "kestral-excalidraw", version: "0.1.4" }));
   await writeFile(join(root, "dist", "app.json"), JSON.stringify({
     id: APP_ID,
-    version: "0.1.3",
+    version: "0.1.4",
     backend: { kind: "process" },
     data: { kind: "host-managed" },
     manifest: {},
@@ -77,7 +77,7 @@ test("creates evidence for the exact app without imposing a generic backend rule
     expectedRepository: REPOSITORY,
   };
   const evidence = await createEvidence(context);
-  assert.deepEqual(evidence.app, { id: APP_ID, version: "0.1.3" });
+  assert.deepEqual(evidence.app, { id: APP_ID, version: "0.1.4" });
   assert.equal(evidence.source.clean, true);
   assert.equal(evidence.package.digest, digest);
   assert.equal(evidence.run.workflow_url, `${REPOSITORY}/actions/runs/12345`);

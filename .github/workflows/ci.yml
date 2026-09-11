@@ -25,11 +25,13 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:package-schema -- .kestral-contract/schemas/app.schema.json
       - run: npm run test:reproducible
       - run: npm run check:generated
+      - run: npm run package:digest
       - name: Require reproducible checked-in package
         run: git diff --exit-code -- dist
       - name: Require a clean immutable source commit

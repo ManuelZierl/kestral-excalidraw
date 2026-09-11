@@ -90,10 +90,13 @@ collection. Proposal artifacts from before this contract are not imported.
 
 ## Build and Test
 
-Node 22 is required.
+Node.js `>=22.19 <23` is required for building and testing only. The packaged
+app is supported on Kestral's Windows x86_64 and Linux x86_64 alpha releases and
+needs no app runtime or backend process.
 
 ```sh
 npm ci
+npm audit --audit-level=high
 npm run typecheck
 npm test
 npm run test:package-schema -- /path/to/versioned/kestral/schemas/app.schema.json
@@ -122,6 +125,12 @@ package digest. `npm run check:generated` checks committed generated output;
 CI validates the manifest against a pinned public Kestral schema commit and
 checks two-build reproducibility.
 
+The immutable `v0.1.3` package is the predecessor for the `0.1.4` update test.
+Updating, disabling, or uninstalling with data retained preserves host-managed
+canvas documents and private view state. Purge removes the app's canvas
+collection and host-owned app state/config; historical Runs and artifacts retain
+their normal Kestral provenance. The app makes no direct network connection.
+
 ## Lifecycle Evidence
 
 The manual host lifecycle attestation and its non-overwriting release workflow
@@ -139,3 +148,9 @@ npm run dev
 Without a Kestral surface bridge the preview uses a non-persistent canvas. It
 is intended for editor and responsive-layout work only and does not represent
 the persisted host contract.
+
+## Maintenance And Support
+
+Manuel Zierl maintains this repository. Report ordinary defects through
+[GitHub Issues](https://github.com/ManuelZierl/kestral-excalidraw/issues) and
+security-sensitive defects through [private vulnerability reporting](https://github.com/ManuelZierl/kestral-excalidraw/security/advisories/new).
