@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { encodeDocument } from "../dataV2Adapter";
+import { encodeDocument, MAX_CHUNK_BYTES } from "../dataV2Adapter";
 import type { AppHostBridge } from "../hostBridge";
 
 export class FakeDataV2 {
@@ -101,6 +101,9 @@ export class FakeDataV2 {
     if (read.kind === "document-list") return { generation: this.generation, results: [{ kind: "document-list", documents: [...this.documents.values()].map(publicDocument), nextAfter: null }] };
     const document = this.documents.get(read.id) ?? null;
     if (read.kind === "document-get") return { generation: this.generation, results: [{ kind: "document-get", document: document ? publicDocument(document) : null }] };
+    if (!document || read.length > MAX_CHUNK_BYTES || read.offset + read.length > document.contentLength) {
+      throw new Error(`managed-data document chunk must be at most ${MAX_CHUNK_BYTES} bytes and within the document`);
+    }
     const content = document.bytes.slice(read.offset, read.offset + read.length);
     return { generation: this.generation, results: [{ kind: "document-content", document: publicDocument(document), offset: read.offset, contentBase64: toBase64(content), contentLength: document.contentLength }] };
   }

@@ -125,7 +125,8 @@ package digest. `npm run check:generated` checks committed generated output;
 CI validates the manifest against a pinned public Kestral schema commit and
 checks two-build reproducibility.
 
-The immutable `v0.1.3` package is the predecessor for the `0.1.4` update test.
+The immutable `0.1.4` package at source commit `1c2fd93144b6c5b00a957ef9b2726293a55a180a`
+is the predecessor for the `0.1.5` update test.
 Updating, disabling, or uninstalling with data retained preserves host-managed
 canvas documents and private view state. Purge removes the app's canvas
 collection and host-owned app state/config; historical Runs and artifacts retain
