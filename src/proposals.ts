@@ -20,7 +20,7 @@ export const PROPOSAL_PAYLOAD_SCHEMA = {
           { type: "object", additionalProperties: false, required: ["kind", "id"], properties: { kind: { enum: ["delete", "restore"] }, id: idSchema() } },
           { type: "object", additionalProperties: false, required: ["kind", "ids"], properties: { kind: { enum: ["group"] }, ids: idsSchema(2) } },
           { type: "object", additionalProperties: false, required: ["kind", "group_id"], properties: { kind: { const: "ungroup" }, group_id: idSchema() } },
-          { type: "object", additionalProperties: false, required: ["kind", "ids", "frame_id"], properties: { kind: { const: "set-frame" }, ids: idsSchema(1), frame_id: { type: ["string", "null"] } } },
+          { type: "object", additionalProperties: false, required: ["kind", "ids", "frame_id"], properties: { kind: { const: "set-frame" }, ids: idsSchema(1), frame_id: { anyOf: [idSchema(), { type: "null" }] } } },
           { type: "object", additionalProperties: false, required: ["kind", "ids", "anchor_id", "position"], properties: { kind: { const: "reorder" }, ids: idsSchema(1), anchor_id: idSchema(), position: { enum: ["before", "after"] } } },
         ],
       },
@@ -52,6 +52,11 @@ export function validateProposalArtifact(artifact: ProposalArtifact, appId: stri
     typeof content.targetRevision !== "number" || !Number.isSafeInteger(content.targetRevision) || content.targetRevision < 1 ||
     !isObject(content.payload) || !Array.isArray(content.payload.operations)) {
     throw new Error("Proposal target or revision envelope is invalid.");
+  }
+  const envelopeKeys = ["targetAppId", "targetKind", "collection", "resourceId", "targetGeneration", "targetRevision", "payload"];
+  if (Object.keys(content).length !== envelopeKeys.length || envelopeKeys.some((key) => !Object.hasOwn(content, key)) ||
+      Object.keys(content.payload).length !== 1 || !Object.hasOwn(content.payload, "operations")) {
+    throw new Error("Proposal envelope or payload contains unsupported fields.");
   }
   const resourcePrefix = `app-data:${appId}:${collection}:document:`;
   const targetPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

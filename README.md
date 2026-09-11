@@ -11,7 +11,8 @@ application.
   state, frontend-derived summary/search projection, schema version, and bounded
   applied-proposal receipts; opaque content owns the complete scene and assets.
 - Create, rename, duplicate, trash, restore, purge, autosave, stale-load
-  suppression, CAS conflict recovery, and **Keep mine as copy**.
+  suppression, CAS conflict recovery, and **Keep mine as copy**. Conflict copies save the complete scene in one
+  document create; copy names are bounded by UTF-8 bytes without splitting code points.
 - Restores the last active canvas and each canvas's zoom and pan position from
   private, revisioned surface state. View changes are saved independently from
   durable scene content and never make a canvas document dirty.
@@ -43,7 +44,10 @@ Metadata-only rename/trash/restore/rejection uses `update-metadata` and does
 not reupload scene content. Scene changes use staged `create` or `replace`.
 `src/surfaceState.ts` separately uses `getState` and `putState` with CAS
 revisions for the active canvas and whitelisted camera fields. Canvas documents
-explicitly exclude `scrollX`, `scrollY`, and `zoom`.
+explicitly exclude `scrollX`, `scrollY`, and `zoom`. Each independent read starts
+a fresh snapshot; only its related reads/chunks share the captured generation.
+Writes acquire a fresh generation without replacing the expected document
+revision, so unrelated writes do not permanently block refresh or autosave.
 
 Kestral owns the document store and surface-state persistence. The app receives
 only the host bridge exposed to its sandboxed surface; it cannot read host
@@ -64,7 +68,12 @@ and **Reject**. The frontend validates the complete envelope and strict bounded
 semantic payload. Apply and reject use document CAS. Applied or rejected
 proposal IDs are recorded in bounded document metadata receipts, preventing
 replay. Malformed, stale, missing-target, and already-receipted proposals are
-refused visibly.
+refused visibly. Pending manual edits are saved before a proposal decision;
+that save can make a proposal stale rather than silently rebasing it. A proposal
+must still match both its target revision and host generation at commit time.
+Receipt storage is limited to 32 decisions per canvas and fails closed at that
+bound; old receipts are never evicted to make replay possible. Copying a canvas
+creates a new target identity and a fresh receipt history.
 
 Chat's only declared access is an approval-required request to create a
 reviewable proposal artifact. Chat cannot directly mutate a canvas. The
@@ -81,10 +90,13 @@ collection. Proposal artifacts from before this contract are not imported.
 
 ## Build and Test
 
-Node 22 is required.
+Node.js `>=22.19 <23` is required for building and testing only. The packaged
+app is supported on Kestral's Windows x86_64 and Linux x86_64 alpha releases and
+needs no app runtime or backend process.
 
 ```sh
 npm ci
+npm audit --audit-level=high
 npm run typecheck
 npm test
 npm run test:package-schema -- /path/to/versioned/kestral/schemas/app.schema.json
@@ -113,6 +125,12 @@ package digest. `npm run check:generated` checks committed generated output;
 CI validates the manifest against a pinned public Kestral schema commit and
 checks two-build reproducibility.
 
+The immutable `v0.1.3` package is the predecessor for the `0.1.4` update test.
+Updating, disabling, or uninstalling with data retained preserves host-managed
+canvas documents and private view state. Purge removes the app's canvas
+collection and host-owned app state/config; historical Runs and artifacts retain
+their normal Kestral provenance. The app makes no direct network connection.
+
 ## Lifecycle Evidence
 
 The manual host lifecycle attestation and its non-overwriting release workflow
@@ -130,3 +148,9 @@ npm run dev
 Without a Kestral surface bridge the preview uses a non-persistent canvas. It
 is intended for editor and responsive-layout work only and does not represent
 the persisted host contract.
+
+## Maintenance And Support
+
+Manuel Zierl maintains this repository. Report ordinary defects through
+[GitHub Issues](https://github.com/ManuelZierl/kestral-excalidraw/issues) and
+security-sensitive defects through [private vulnerability reporting](https://github.com/ManuelZierl/kestral-excalidraw/security/advisories/new).

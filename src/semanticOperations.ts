@@ -59,8 +59,9 @@ export function parseCanvasOperations(value: unknown): CanvasOperation[] {
       case "restore":
         return [operation.id];
       case "group":
-      case "set-frame":
         return operation.ids;
+      case "set-frame":
+        return [...operation.ids, ...(operation.frame_id === null ? [] : [operation.frame_id])];
       case "ungroup":
         return [];
       case "reorder":
@@ -84,7 +85,7 @@ export function normalizeSemanticElement(input: SemanticElementInput): JsonObjec
   if (input.type !== "text" && input.type !== "frame" && input.text !== undefined) {
     throw new Error("text may only be used with text or frame elements");
   }
-  validateStyleEnums(input);
+  validatePatchValues(input);
   const id = input.id ?? globalThis.crypto.randomUUID();
   assertElementId(id);
   const base: JsonObject = {
@@ -190,6 +191,9 @@ function applyOperation(scene: SceneDocument, op: CanvasOperation, changes: Oper
 
 function updateElement(scene: SceneDocument, id: string, patch: SemanticUpdatePatch): void {
   const element = liveElement(scene, id);
+  const previousWidth = Number(element.width);
+  const previousHeight = Number(element.height);
+  validatePatchValues(patch);
   for (const key of Object.keys(patch)) if (!allowedPatchKeys.has(key)) throw new Error(`unsupported patch field '${key}'`);
   const textStyleKeys = ["fontSize", "fontFamily", "textAlign", "verticalAlign"];
   if (element.type !== "text" && textStyleKeys.some((key) => key in patch)) {
@@ -228,7 +232,18 @@ function updateElement(scene: SceneDocument, id: string, patch: SemanticUpdatePa
   }
   if ((element.type === "line" || element.type === "arrow") && (patch.width !== undefined || patch.height !== undefined)) {
     const points = Array.isArray(element.points) ? element.points : [];
-    element.points = [points[0] ?? [0, 0], [Number(element.width), Number(element.height)]];
+    const scale = (previous: number, next: number) => {
+      if (previous === 0 && next !== 0) throw new Error("Cannot expand a zero-size polyline axis with semantic resizing.");
+      return previous === 0 ? 1 : next / previous;
+    };
+    const scaleX = scale(previousWidth, Number(element.width));
+    const scaleY = scale(previousHeight, Number(element.height));
+    element.points = points.map((point) => {
+      if (!Array.isArray(point) || point.length !== 2 || !point.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        throw new Error("Cannot resize a polyline with invalid points.");
+      }
+      return [point[0] * scaleX, point[1] * scaleY];
+    });
   }
   bump(element);
 }
@@ -352,7 +367,31 @@ function nextNonce(): number {
   return Math.floor(Math.random() * 2 ** 31);
 }
 
-function validateStyleEnums(input: SemanticElementInput): void {
+const numericRanges: Record<string, readonly [number, number]> = {
+  x: [-1e6, 1e6], y: [-1e6, 1e6], width: [0, 1e6], height: [0, 1e6], angle: [-360, 360],
+  strokeWidth: [1, 100], roughness: [0, 100], opacity: [0, 100], fontSize: [8, 256], fontFamily: [1, 10],
+};
+
+function validatePatchValues(input: SemanticUpdatePatch): void {
+  for (const [key, value] of Object.entries(input)) {
+    const range = Object.hasOwn(numericRanges, key) ? numericRanges[key] : undefined;
+    if (range) {
+      if (typeof value !== "number") throw new Error(`${key} must be a number`);
+      number(value, range[0], range[1]);
+    } else if (key === "text") {
+      if (typeof value !== "string") throw new Error("text must be a string");
+      limitText(value, 2000);
+    } else if (key === "strokeColor" || key === "backgroundColor") {
+      if (typeof value !== "string" || (key === "strokeColor" && value === "transparent")) throw new Error(`invalid ${key}`);
+      color(value);
+    } else if (value === null || value === undefined) {
+      throw new Error(`${key} must not be null or undefined`);
+    }
+  }
+  validateStyleEnums(input);
+}
+
+function validateStyleEnums(input: SemanticUpdatePatch): void {
   if (input.fillStyle !== undefined) enumValue(input.fillStyle, ["solid", "hachure", "cross-hatch"], "fillStyle");
   if (input.strokeStyle !== undefined) enumValue(input.strokeStyle, ["solid", "dashed", "dotted"], "strokeStyle");
   if (input.textAlign !== undefined) enumValue(input.textAlign, ["left", "center", "right"], "textAlign");
@@ -389,6 +428,14 @@ function assertUniqueSelection(ids: string[], minimum: number): void {
 function parseOperation(value: unknown): CanvasOperation {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("operation must be an object");
   const operation = value as Record<string, unknown>;
+  const keysByKind: Record<string, string[]> = {
+    add: ["kind", "element"], update: ["kind", "id", "patch"], delete: ["kind", "id"], restore: ["kind", "id"],
+    group: ["kind", "ids"], ungroup: ["kind", "group_id"], "set-frame": ["kind", "ids", "frame_id"],
+    reorder: ["kind", "ids", "anchor_id", "position"],
+  };
+  if (typeof operation.kind !== "string" || !Object.hasOwn(keysByKind, operation.kind)) throw new Error(`unsupported operation '${String(operation.kind)}'`);
+  const keys = keysByKind[operation.kind];
+  if (Object.keys(operation).length !== keys.length || keys.some((key) => !Object.hasOwn(operation, key))) throw new Error("unsupported or missing operation fields");
   switch (operation.kind) {
     case "add":
       normalizeSemanticElement(operation.element as SemanticElementInput);
@@ -396,12 +443,13 @@ function parseOperation(value: unknown): CanvasOperation {
     case "update":
       if (!operation.patch || typeof operation.patch !== "object" || Array.isArray(operation.patch)) throw new Error("update patch must be an object");
       for (const key of Object.keys(operation.patch)) if (!allowedPatchKeys.has(key)) throw new Error(`unsupported patch field '${key}'`);
+      validatePatchValues(operation.patch as SemanticUpdatePatch);
       return { kind: "update", id: elementId(operation.id), patch: operation.patch as SemanticUpdatePatch };
     case "delete":
     case "restore":
       return { kind: operation.kind, id: elementId(operation.id) };
     case "group":
-      return { kind: "group", ids: parseIds(operation.ids) };
+      return { kind: "group", ids: parseIds(operation.ids, 2) };
     case "ungroup":
       return { kind: "ungroup", group_id: elementId(operation.group_id) };
     case "set-frame": {
@@ -422,7 +470,9 @@ function parseOperation(value: unknown): CanvasOperation {
   }
 }
 
-function parseIds(value: unknown): string[] {
+function parseIds(value: unknown, minimum = 1): string[] {
   if (!Array.isArray(value)) throw new Error("operation ids must be an array");
-  return value.map(elementId);
+  const ids = value.map(elementId);
+  assertUniqueSelection(ids, minimum);
+  return ids;
 }

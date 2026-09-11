@@ -122,7 +122,7 @@ function semanticProposalPayloadSchema() {
     { type: "object", additionalProperties: false, required: ["kind", "id"], properties: { kind: { enum: ["delete", "restore"] }, id } },
     { type: "object", additionalProperties: false, required: ["kind", "ids"], properties: { kind: { const: "group" }, ids: ids(2) } },
     { type: "object", additionalProperties: false, required: ["kind", "group_id"], properties: { kind: { const: "ungroup" }, group_id: id } },
-    { type: "object", additionalProperties: false, required: ["kind", "ids", "frame_id"], properties: { kind: { const: "set-frame" }, ids: ids(1), frame_id: { type: ["string", "null"] } } },
+    { type: "object", additionalProperties: false, required: ["kind", "ids", "frame_id"], properties: { kind: { const: "set-frame" }, ids: ids(1), frame_id: { anyOf: [id, { type: "null" }] } } },
     { type: "object", additionalProperties: false, required: ["kind", "ids", "anchor_id", "position"], properties: { kind: { const: "reorder" }, ids: ids(1), anchor_id: id, position: { enum: ["before", "after"] } } },
   ] } } } };
 }

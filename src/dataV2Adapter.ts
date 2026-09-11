@@ -114,6 +114,9 @@ export class DataV2Adapter {
     if (!Number.isSafeInteger(result.generation) || result.generation < 0 || !Array.isArray(result.results) || result.results.length !== request.reads.length) {
       throw new Error("The host returned an invalid data.v2 snapshot.");
     }
+    if (request.expectedGeneration !== undefined && result.generation !== request.expectedGeneration) {
+      throw new DataV2ConflictError("The host returned a different snapshot generation.");
+    }
     return result;
   }
 
@@ -123,8 +126,7 @@ export class DataV2Adapter {
     let generation: number | undefined;
     for (let page = 0; page < 100; page += 1) {
       const result = await this.readSnapshot({
-        ...(generation === undefined ? {} : { expectedGeneration: generation }),
-        ...(expectedGeneration === undefined && generation === undefined ? {} : { expectedGeneration: expectedGeneration ?? generation }),
+        ...((generation ?? expectedGeneration) === undefined ? {} : { expectedGeneration: generation ?? expectedGeneration }),
         reads: [{ kind: "document-list", collection, ...(after ? { after } : {}), limit: 100 }],
       });
       generation ??= result.generation;
@@ -161,7 +163,8 @@ export class DataV2Adapter {
       });
       if (result.generation !== expectedGeneration) throw new DataV2ConflictError("Canvas changed while loading.");
       const item = result.results[0];
-      if (item.kind !== "document-content" || item.offset !== offset || item.contentLength !== document.contentLength) {
+      if (item.kind !== "document-content" || item.offset !== offset || item.contentLength !== document.contentLength ||
+        item.document.id !== document.id || item.document.revision !== document.revision || item.document.contentSha256 !== document.contentSha256 || item.document.contentLength !== document.contentLength) {
         throw new Error("The host returned an invalid document chunk.");
       }
       const chunk = decodeBase64(item.contentBase64);
@@ -180,13 +183,14 @@ export class DataV2Adapter {
     documents: DocumentMutation[];
     contents: Array<{ stageId: string; bytes: Uint8Array }>;
   }): Promise<BatchResult<T>> {
-    const begin = await this.wire.beginBatch({
-      mutationId: freshId(),
-      expectedGeneration: input.expectedGeneration,
-      operations: [],
-      documents: input.documents,
-    });
+    let begin: BeginBatchResult | undefined;
     try {
+      begin = await this.wire.beginBatch({
+        mutationId: freshId(),
+        expectedGeneration: input.expectedGeneration,
+        operations: [],
+        documents: input.documents,
+      });
       const allocated = new Map(begin.documents.map(({ stageId, documentId }) => [stageId, documentId]));
       for (const content of input.contents) {
         const documentId = allocated.get(content.stageId);
@@ -199,7 +203,7 @@ export class DataV2Adapter {
       return await this.wire.commitBatch({ mutationId: freshId(), batchId: begin.batchId }) as BatchResult<T>;
     } catch (error) {
       try {
-        await this.wire.abortBatch({ mutationId: freshId(), batchId: begin.batchId });
+        if (begin) await this.wire.abortBatch({ mutationId: freshId(), batchId: begin.batchId });
       } catch {
         // Preserve the write failure; the host expires abandoned batches.
       }

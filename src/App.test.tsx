@@ -1,7 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { encodeDocument } from "./dataV2Adapter";
-import type { AppHostBridge } from "./hostBridge";
+import { FakeDataV2, uuid, testElement, deferred } from "./test/fakeDataV2";
 
 vi.mock("@excalidraw/excalidraw", async () => {
   const { useEffect } = await import("react");
@@ -11,7 +10,8 @@ vi.mock("@excalidraw/excalidraw", async () => {
       return <div data-testid="excalidraw">
         <span data-testid="scene-id">{String(initialData?.elements?.[0]?.id ?? "empty")}</span>
         <span data-testid="viewport">{`${initialData?.appState?.scrollX ?? 0},${initialData?.appState?.scrollY ?? 0},${initialData?.appState?.zoom?.value ?? 1}`}</span>
-        <button type="button" disabled={viewModeEnabled} onClick={() => onChange([{ id: "changed" }], { scrollX: 12, scrollY: -8, zoom: { value: 2 } }, {})}>Make dirty</button>
+        <button type="button" disabled={viewModeEnabled} onClick={() => onChange([testElement("changed")], { scrollX: 12, scrollY: -8, zoom: { value: 2 } }, {})}>Make dirty</button>
+        <button type="button" disabled={viewModeEnabled} onClick={() => onChange([testElement("newer")], {}, {})}>Make newer edit</button>
         <button type="button" onClick={() => onScrollChange(12, -8, { value: 2 })}>Move view</button>
       </div>;
     },
@@ -139,115 +139,152 @@ describe("document-only whiteboard", () => {
   });
 });
 
-class FakeDataV2 {
-  generation = 1;
-  nextId = 1;
-  conflictOnReplace = false;
-  proposalEnabled = false;
-  proposalStale = false;
-  documents = new Map<string, any>();
-  batches: any[] = [];
-  commits: any[] = [];
-  state = new Map<string, { revision: number; value: Record<string, unknown> | null }>();
-  host: AppHostBridge;
-  private init: ((context: { theme: "light" | "dark" | null; variables: Record<string, string> }) => void) | null = null;
 
-  constructor() {
-    const wire = {
-      readSnapshot: async (request: any) => this.readSnapshot(request),
-      beginBatch: async (request: any) => {
-        if (request.expectedGeneration !== this.generation) throw new Error("generation conflict");
-        const batch = { id: `batch-${this.batches.length + 1}`, ...request, staged: new Map<string, string>(), chunks: new Map<string, Uint8Array[]>() };
-        for (const document of request.documents) if (document.stageId) batch.staged.set(document.stageId, document.kind === "create" ? uuid(this.nextId++) : document.id);
-        this.batches.push(batch);
-        return { batchId: batch.id, generation: this.generation, documents: [...batch.staged].map(([stageId, documentId]) => ({ stageId, documentId })) };
-      },
-      appendDocumentChunk: async (request: any) => {
-        const batch = this.batches.find((candidate) => candidate.id === request.batchId);
-        const chunks = batch.chunks.get(request.documentId) ?? [];
-        chunks[request.chunkIndex] = fromBase64(request.contentBase64);
-        batch.chunks.set(request.documentId, chunks);
-      },
-      commitBatch: async (request: any) => this.commitBatch(request.batchId),
-      abortBatch: async () => {},
-    };
-    this.host = {
-      theme: "light", variables: {}, ready: () => this.init?.({ theme: "light", variables: {} }), reportError: vi.fn(), onInit: (callback: (context: { theme: "light" | "dark" | null; variables: Record<string, string> }) => void) => { this.init = callback; }, onEvent: () => {},
-      invoke: async () => ({}), invokeScoped: async () => ({}), listArtifacts: async () => this.proposalEnabled ? [this.proposal()] : [], data: { v2: wire },
-      getState: async (key: string) => structuredClone(this.state.get(key) ?? { revision: 0, value: null }),
-      putState: async (key: string, expectedRevision: number, value: Record<string, unknown> | null) => {
-        const current = this.state.get(key) ?? { revision: 0, value: null };
-        if (current.revision !== expectedRevision) throw new Error("surface state revision conflict");
-        const updated = { revision: current.revision + 1, value: structuredClone(value) };
-        this.state.set(key, updated);
-        return structuredClone(updated);
-      },
-    } as unknown as AppHostBridge;
+describe("whiteboard edit and refresh races", () => {
+  async function mount(fake: FakeDataV2) {
+    window.appHost = fake.host;
+    const { default: App } = await import("./App");
+    render(<App />);
+    await screen.findByTestId("excalidraw");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
   }
 
-  seedState(key: string, value: Record<string, unknown> | null) {
-    this.state.set(key, { revision: 1, value: structuredClone(value) });
-  }
+  it("does not overwrite pending manual edits when Apply is clicked", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    fake.proposalEnabled = true;
+    await mount(fake);
+    await screen.findByText("Review canvas proposal");
+    fireEvent.click(screen.getByRole("button", { name: "Make dirty" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await vi.waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/stale|unsaved/i));
+    const saved = JSON.parse(new TextDecoder().decode(fake.documents.get(uuid(1)).bytes));
+    expect(saved.elements[0].id).toBe("changed");
+    expect(fake.documents.get(uuid(1)).metadata.applied_proposals).toHaveLength(0);
+  });
 
-  async seedCanvas(id: string, title: string, sceneId: string) {
-    const scene = { type: "kestral-excalidraw", version: 1, editor: "excalidraw", elements: [{ id: sceneId }], appState: {}, files: {} };
-    const encoded = await encodeDocument(scene);
-    this.documents.set(id, {
-      id,
-      revision: 1,
-      createdAt: now(),
-      updatedAt: now(),
-      metadata: {
-        schema_version: 2,
-        title,
-        trashed_at: null,
-        summary: { element_count: 1, element_count_by_type: {}, deleted_count: 0, bounds: null, text_snippets: [] },
-        searchable_text: "",
-        applied_proposals: [],
-      },
-      contentSha256: encoded.contentSha256,
-      contentLength: encoded.bytes.length,
-      bytes: encoded.bytes,
+  it("can autosave immediately after rejecting a proposal", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    fake.proposalEnabled = true;
+    await mount(fake);
+    await screen.findByText("Review canvas proposal");
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await vi.waitFor(() => expect(screen.queryByText("Review canvas proposal")).toBeNull());
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Make dirty" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await vi.waitFor(() => expect(fake.commits).toHaveLength(2));
+    expect(fake.documents.get(uuid(1)).metadata.applied_proposals[0].status).toBe("rejected");
+    expect(screen.queryByText("This canvas changed elsewhere.")).toBeNull();
+  });
+
+  it("refreshes externally changed canvases repeatedly, not just at startup", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    await mount(fake);
+    fake.documents.get(uuid(1)).metadata.title = "External title";
+    fake.documents.get(uuid(1)).revision += 1;
+    fake.generation += 1;
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /External title.*r2/ })).toBeTruthy());
+    expect(fake.host.reportError).not.toHaveBeenCalled();
+  });
+
+  it("applies a focus refresh received while a save is settling", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    const saveSettled = deferred();
+    fake.afterCommit = async () => saveSettled.promise;
+    await mount(fake);
+    vi.useFakeTimers();
+
+    fireEvent.click(screen.getByRole("button", { name: "Make dirty" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await vi.waitFor(() => expect(fake.commits).toHaveLength(1));
+
+    fake.documents.get(uuid(1)).metadata.title = "External title";
+    fake.documents.get(uuid(1)).revision += 1;
+    fake.generation += 1;
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    saveSettled.resolve();
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /External title.*r3/ })).toBeTruthy());
+    expect(screen.getByRole("status").textContent).not.toContain("Saving");
+  });
+
+  it("does not discard edits made while another canvas is loading", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "first");
+    await fake.seedCanvas(uuid(2), "Second", "second");
+    await mount(fake);
+    const loading = deferred();
+    fake.beforeRead = async (request) => { if (request.reads[0].id === uuid(2)) await loading.promise; };
+    fireEvent.click(screen.getByRole("button", { name: /Second.*r1/ }));
+    await act(async () => {});
+    const edit = screen.getByRole("button", { name: "Make dirty" }) as HTMLButtonElement;
+    expect(edit.disabled).toBe(true);
+    fireEvent.click(edit);
+    await act(async () => { loading.resolve(); });
+    await vi.waitFor(() => expect(screen.getByRole("status").textContent).not.toContain("Opening canvas"));
+    expect(screen.getByTestId("scene-id").textContent).toBe("second");
+  });
+
+  it("creates a full conflict copy in one batch even at the title byte limit", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "😀".repeat(30), "original");
+    fake.conflictOnReplace = true;
+    await mount(fake);
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Make dirty" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Keep mine as copy" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Keep mine as copy" }));
+    await vi.waitFor(() => expect(fake.commits).toHaveLength(1));
+    const copy = fake.documents.get(uuid(2));
+    expect(new TextEncoder().encode(copy.metadata.title).length).toBeLessThanOrEqual(120);
+    expect(copy.metadata.title).toContain("(conflict copy)");
+    expect(JSON.parse(new TextDecoder().decode(copy.bytes)).elements[0].id).toBe("changed");
+    expect(fake.batches.at(-1).documents[0].kind).toBe("create");
+    await vi.waitFor(() => expect(screen.getByTestId("scene-id").textContent).toBe("changed"));
+  });
+
+  it("retains proposal cards after focus refreshes and does not resurrect a rejected card from an old refresh", async () => {
+    const fake = new FakeDataV2();
+    await fake.seedCanvas(uuid(1), "First", "original");
+    fake.proposalEnabled = true;
+    await mount(fake);
+    await screen.findByText("Review canvas proposal");
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(screen.getByText("Review canvas proposal")).toBeTruthy();
+    const artifacts = await fake.host.listArtifacts();
+    const pending = deferred<typeof artifacts>();
+    fake.host.listArtifacts = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue(artifacts);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await vi.waitFor(() => expect(fake.host.listArtifacts).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await vi.waitFor(() => expect(screen.queryByText("Review canvas proposal")).toBeNull());
+    await act(async () => { pending.resolve(artifacts); });
+    expect(screen.queryByText("Review canvas proposal")).toBeNull();
+  });
+
+  it("ignores callbacks after unmount and repeated initialization does not create another canvas", async () => {
+    const fake = new FakeDataV2();
+    window.appHost = fake.host;
+    const { default: App } = await import("./App");
+    const mounted = render(<App />);
+    await screen.findByTestId("excalidraw");
+    await act(async () => { fake.host.ready(); });
+    expect(fake.documents.size).toBe(1);
+    mounted.unmount();
+    const reads = fake.reads.length;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      fake.host.ready();
     });
-  }
+    expect(fake.reads).toHaveLength(reads);
+    expect(fake.documents.size).toBe(1);
+  });
 
-  private proposal() {
-    const document = [...this.documents.values()][0];
-    return { artifact_id: "proposal-1", artifact_type: "canvas-operations-proposal", title: "Add proposal text", content: { targetAppId: "com.ma-zierl.kestral-excalidraw", targetKind: "document", collection: "canvases", resourceId: `app-data:com.ma-zierl.kestral-excalidraw:canvases:document:${document.id}`, targetGeneration: this.generation, targetRevision: this.proposalStale ? document.revision + 1 : document.revision, payload: { operations: [{ kind: "add", element: { type: "text", id: "proposal-text", text: "Approved" } }] } } };
-  }
-
-  private async readSnapshot(request: any) {
-    const read = request.reads[0];
-    if (read.kind === "document-list") return { generation: this.generation, results: [{ kind: "document-list", documents: [...this.documents.values()].map(publicDocument), nextAfter: null }] };
-    const document = this.documents.get(read.id) ?? null;
-    if (read.kind === "document-get") return { generation: this.generation, results: [{ kind: "document-get", document: document ? publicDocument(document) : null }] };
-    const content = document.bytes.slice(read.offset, read.offset + read.length);
-    return { generation: this.generation, results: [{ kind: "document-content", document: publicDocument(document), offset: read.offset, contentBase64: toBase64(content), contentLength: document.contentLength }] };
-  }
-
-  private async commitBatch(batchId: string) {
-    const batch = this.batches.find((candidate) => candidate.id === batchId);
-    const touched: any[] = [];
-    for (const stage of batch.documents) {
-      const id = batch.staged.get(stage.stageId) ?? stage.id;
-      const current = this.documents.get(id);
-      if (stage.kind === "delete") { this.documents.delete(id); continue; }
-      if ((stage.kind === "replace" || stage.kind === "update-metadata") && (!current || current.revision !== stage.expectedRevision)) throw new Error("revision conflict");
-      if (this.conflictOnReplace && stage.kind === "replace") { this.conflictOnReplace = false; throw new Error("revision conflict"); }
-      const bytes = stage.kind === "update-metadata" ? current.bytes : concat(batch.chunks.get(id) ?? []);
-      const document = { id, revision: current ? current.revision + 1 : 1, createdAt: current?.createdAt ?? now(), updatedAt: now(), metadata: stage.metadata, contentSha256: stage.kind === "update-metadata" ? current.contentSha256 : stage.contentSha256, contentLength: bytes.length, bytes };
-      this.documents.set(id, document); touched.push(publicDocument(document));
-    }
-    this.generation += 1;
-    const result = { generation: this.generation, records: [], documents: touched };
-    this.commits.push(result);
-    return result;
-  }
-}
-
-function publicDocument(document: any) { const { bytes: _bytes, ...metadata } = document; return metadata; }
-function concat(chunks: Uint8Array[]) { const result = new Uint8Array(chunks.reduce((sum, chunk) => sum + (chunk?.length ?? 0), 0)); let offset = 0; for (const chunk of chunks) { if (!chunk) continue; result.set(chunk, offset); offset += chunk.length; } return result; }
-function uuid(seed: number) { return `00000000-0000-4000-8000-${String(seed).padStart(12, "0")}`; }
-function now() { return "2026-08-05T00:00:00.000Z"; }
-function toBase64(bytes: Uint8Array) { let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); }
-function fromBase64(value: string) { const binary = atob(value); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
+});

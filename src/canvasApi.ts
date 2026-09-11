@@ -2,7 +2,7 @@ import type { BoardDocument } from "./boardDocument";
 import { parseBoardDocument } from "./boardDocument";
 import {
   CANVAS_DOCUMENTS, DataV2Adapter, DataV2ConflictError, MAX_TITLE_BYTES,
-  type BatchResult, type DocumentMutation, type ManagedDocumentRecord, encodeDocument, decodeDocument,
+  type DocumentMutation, type ManagedDocumentRecord, encodeDocument, decodeDocument,
 } from "./dataV2Adapter";
 import { applyCanvasOperations } from "./semanticOperations";
 import type { JsonObject, SceneDocument } from "./semanticTypes";
@@ -47,46 +47,44 @@ export interface PurgeResult { outcome: "purged" | "conflict" | "not-found" | "n
 const EMPTY_DOCUMENT: BoardDocument = { type: "kestral-excalidraw", version: 1, editor: "excalidraw", elements: [], appState: {}, files: {} };
 
 export class CanvasRepository {
-  private generation: number | null = null;
   constructor(private readonly data: DataV2Adapter) {}
 
   async listCanvases(): Promise<CanvasMeta[]> {
-    const result = await this.data.listDocuments<CanvasMetadata>(CANVAS_DOCUMENTS, this.generation ?? undefined);
-    this.generation = result.generation;
+    const result = await this.data.listDocuments<CanvasMetadata>(CANVAS_DOCUMENTS);
     return result.documents.map(toCanvasMeta);
   }
 
   async loadCanvas(id: string): Promise<CanvasRecord | null> {
-    const found = await this.data.getDocument<CanvasMetadata>(CANVAS_DOCUMENTS, id, this.generation ?? undefined);
-    this.generation = found.generation;
+    const found = await this.data.getDocument<CanvasMetadata>(CANVAS_DOCUMENTS, id);
     if (!found.document) return null;
     const bytes = await this.data.readDocument(CANVAS_DOCUMENTS, found.document, found.generation);
     return { ...toCanvasMeta(found.document), scene: parseBoardDocument(decodeDocument(bytes)) };
   }
 
   async getCanvasMeta(id: string): Promise<CanvasMeta | null> {
-    const found = await this.data.getDocument<CanvasMetadata>(CANVAS_DOCUMENTS, id, this.generation ?? undefined);
-    this.generation = found.generation;
+    const found = await this.data.getDocument<CanvasMetadata>(CANVAS_DOCUMENTS, id);
     return found.document ? toCanvasMeta(found.document) : null;
   }
 
   async createCanvas(title: string, scene: BoardDocument = EMPTY_DOCUMENT): Promise<CreateCanvasResult> {
     assertTitle(title);
+    scene = parseBoardDocument(scene);
     const encoded = await encodeDocument(scene);
     const committed = await this.data.runBatch<CanvasMetadata>({
       expectedGeneration: await this.requireGeneration(),
       documents: [{ kind: "create", stageId: "scene", collection: CANVAS_DOCUMENTS, metadata: metadataFor(title, scene), contentLength: encoded.bytes.byteLength, contentSha256: encoded.contentSha256 }],
       contents: [{ stageId: "scene", bytes: encoded.bytes }],
     });
-    this.generation = committed.generation;
     const document = committed.documents[0];
     if (!document) throw new Error("The host committed a canvas without returning its document.");
     return { canvas: toCanvasMeta(document) };
   }
 
-  async replaceCanvas(canvas: CanvasMeta, scene: BoardDocument, receipt?: AppliedProposalReceipt): Promise<MutationResult> {
+  async replaceCanvas(canvas: CanvasMeta, scene: BoardDocument, receipt?: AppliedProposalReceipt, expectedGeneration?: number): Promise<MutationResult> {
+    scene = parseBoardDocument(scene);
     const encoded = await encodeDocument(scene);
     return this.runMutation(canvas, {
+      expectedGeneration,
       documents: [{ kind: "replace", stageId: "scene", collection: CANVAS_DOCUMENTS, id: canvas.id, expectedRevision: canvas.revision, metadata: metadataFor(canvas.title, scene, receipt ? appendReceipt(canvas.metadata, receipt) : canvas.metadata), contentLength: encoded.bytes.byteLength, contentSha256: encoded.contentSha256 }],
       contents: [{ stageId: "scene", bytes: encoded.bytes }],
     });
@@ -96,7 +94,7 @@ export class CanvasRepository {
     if (action === "duplicate") {
       const source = await this.loadCanvas(canvas.id);
       if (!source) return { outcome: "not-found", canvas: null };
-      return this.createCanvas(title ?? `Copy of ${canvas.title}`, source.scene);
+      return this.createCanvas(title ?? deriveCopyTitle(source.title), source.scene);
     }
     if (action === "rename") assertTitle(title ?? "");
     if (action === "trash" && canvas.trashed_at !== null || action === "restore" && canvas.trashed_at === null) return { outcome: "not-trashed", canvas };
@@ -107,51 +105,90 @@ export class CanvasRepository {
   async purgeCanvas(canvas: CanvasMeta): Promise<PurgeResult> {
     if (canvas.trashed_at === null) return { outcome: "not-trashed", id: canvas.id, canvas };
     try {
-      const committed = await this.data.runBatch<CanvasMetadata>({ expectedGeneration: await this.requireGeneration(), documents: [{ kind: "delete", collection: CANVAS_DOCUMENTS, id: canvas.id, expectedRevision: canvas.revision }], contents: [] });
-      this.generation = committed.generation;
+      await this.data.runBatch<CanvasMetadata>({ expectedGeneration: await this.requireGeneration(), documents: [{ kind: "delete", collection: CANVAS_DOCUMENTS, id: canvas.id, expectedRevision: canvas.revision }], contents: [] });
       return { outcome: "purged", id: canvas.id, canvas: null };
     } catch (error) {
       if (!isConflict(error)) throw error;
-      this.generation = (await this.data.listDocuments(CANVAS_DOCUMENTS)).generation;
-      return { outcome: "conflict", id: canvas.id, canvas: await this.getCanvasMeta(canvas.id) };
+      const latest = await this.getCanvasMeta(canvas.id);
+      return { outcome: latest ? "conflict" : "not-found", id: canvas.id, canvas: latest };
     }
   }
 
   async applyProposal(canvas: CanvasMeta, proposal: CanvasProposal): Promise<MutationResult & { changes?: unknown }> {
-    if (canvas.metadata.applied_proposals.some((receipt) => receipt.proposal_id === proposal.artifactId)) return { outcome: "replayed", canvas };
-    if (canvas.revision !== proposal.targetRevision || this.generation !== proposal.targetGeneration) return { outcome: "stale", canvas };
-    const loaded = await this.loadCanvas(canvas.id);
-    if (!loaded) return { outcome: "not-found", canvas: null };
-    const applied = applyCanvasOperations(loaded.scene as unknown as SceneDocument, proposal.operations);
-    const result = await this.replaceCanvas(canvas, applied.scene as unknown as BoardDocument, { proposal_id: proposal.artifactId, status: "applied", target_revision: canvas.revision });
-    return { ...result, changes: applied.changes };
+    const target = await this.proposalTarget(canvas, proposal);
+    if ("outcome" in target) return target;
+    try {
+      const bytes = await this.data.readDocument(CANVAS_DOCUMENTS, target.document, target.generation);
+      const scene = parseBoardDocument(decodeDocument(bytes));
+      const applied = applyCanvasOperations(scene as unknown as SceneDocument, proposal.operations);
+      const result = await this.replaceCanvas(target.canvas, applied.scene as unknown as BoardDocument,
+        { proposal_id: proposal.artifactId, status: "applied", target_revision: target.canvas.revision }, target.generation);
+      return { ...result, changes: applied.changes };
+    } catch (error) {
+      return this.mutationFailure(canvas.id, error);
+    }
   }
 
   async rejectProposal(canvas: CanvasMeta, proposal: CanvasProposal): Promise<MutationResult> {
-    if (canvas.metadata.applied_proposals.some((receipt) => receipt.proposal_id === proposal.artifactId)) return { outcome: "replayed", canvas };
-    if (canvas.revision !== proposal.targetRevision || this.generation !== proposal.targetGeneration) return { outcome: "stale", canvas };
-    return this.runMutation(canvas, { documents: [{ kind: "update-metadata", collection: CANVAS_DOCUMENTS, id: canvas.id, expectedRevision: canvas.revision, metadata: appendReceipt(canvas.metadata, { proposal_id: proposal.artifactId, status: "rejected", target_revision: canvas.revision }) }], contents: [] });
+    const target = await this.proposalTarget(canvas, proposal);
+    if ("outcome" in target) return target;
+    return this.runMutation(target.canvas, {
+      expectedGeneration: target.generation,
+      documents: [{ kind: "update-metadata", collection: CANVAS_DOCUMENTS, id: target.canvas.id, expectedRevision: target.canvas.revision,
+        metadata: appendReceipt(target.canvas.metadata, { proposal_id: proposal.artifactId, status: "rejected", target_revision: target.canvas.revision }) }],
+      contents: [],
+    });
   }
 
-  private async runMutation(canvas: CanvasMeta, input: { documents: DocumentMutation[]; contents: Array<{ stageId: string; bytes: Uint8Array }> }): Promise<MutationResult> {
+  private async proposalTarget(canvas: CanvasMeta, proposal: CanvasProposal): Promise<MutationResult | {
+    canvas: CanvasMeta; document: ManagedDocumentRecord<CanvasMetadata>; generation: number;
+  }> {
+    if (canvas.id !== proposal.targetId) throw new Error("The proposal targets a different canvas.");
+    const found = await this.data.getDocument<CanvasMetadata>(CANVAS_DOCUMENTS, proposal.targetId);
+    if (!found.document) return { outcome: "not-found", canvas: null };
+    const latest = toCanvasMeta(found.document);
+    if (latest.metadata.applied_proposals.some((receipt) => receipt.proposal_id === proposal.artifactId)) return { outcome: "replayed", canvas: latest };
+    if (latest.trashed_at !== null || latest.revision !== proposal.targetRevision || found.generation !== proposal.targetGeneration) return { outcome: "stale", canvas: latest };
+    return { canvas: latest, document: found.document, generation: found.generation };
+  }
+
+  private async runMutation(canvas: CanvasMeta, input: { expectedGeneration?: number; documents: DocumentMutation[]; contents: Array<{ stageId: string; bytes: Uint8Array }> }): Promise<MutationResult> {
     try {
-      const committed = await this.data.runBatch<CanvasMetadata>({ expectedGeneration: await this.requireGeneration(), ...input });
-      this.generation = committed.generation;
+      const committed = await this.data.runBatch<CanvasMetadata>({ ...input, expectedGeneration: input.expectedGeneration ?? await this.requireGeneration() });
       const document = committed.documents.find((item) => item.id === canvas.id);
       if (!document) throw new Error("The host committed a canvas mutation without returning its document.");
       return { outcome: "applied", canvas: toCanvasMeta(document) };
     } catch (error) {
-      if (!isConflict(error)) throw error;
-      this.generation = (await this.data.listDocuments(CANVAS_DOCUMENTS)).generation;
-      return { outcome: "conflict", canvas: await this.getCanvasMeta(canvas.id) };
+      return this.mutationFailure(canvas.id, error);
     }
   }
 
-  private async requireGeneration(): Promise<number> {
-    if (this.generation !== null) return this.generation;
-    this.generation = (await this.data.listDocuments(CANVAS_DOCUMENTS)).generation;
-    return this.generation;
+  private async mutationFailure(id: string, error: unknown): Promise<MutationResult> {
+    if (!isConflict(error)) throw error;
+    const latest = await this.getCanvasMeta(id);
+    return { outcome: latest ? "conflict" : "not-found", canvas: latest };
   }
+
+  private async requireGeneration(): Promise<number> {
+    // A generation belongs to one snapshot/batch, not the repository lifetime.
+    const snapshot = await this.data.readSnapshot({ reads: [{ kind: "document-list", collection: CANVAS_DOCUMENTS, limit: 1 }] });
+    return snapshot.generation;
+  }
+}
+
+export function deriveCopyTitle(title: string, conflict = false): string {
+  const prefix = conflict ? "" : "Copy of ";
+  const suffix = conflict ? " (conflict copy)" : "";
+  const encoder = new TextEncoder();
+  let remaining = MAX_TITLE_BYTES - encoder.encode(prefix + suffix).byteLength;
+  let truncated = "";
+  for (const character of title) {
+    const length = encoder.encode(character).byteLength;
+    if (length > remaining) break;
+    truncated += character;
+    remaining -= length;
+  }
+  return `${prefix}${truncated.trimEnd()}${suffix}`;
 }
 
 export function summarizeScene(scene: BoardDocument): CanvasSummary {
@@ -184,7 +221,8 @@ export function searchCanvasMetadata(canvases: CanvasMeta[], query: string): Can
 }
 
 function metadataFor(title: string, scene: BoardDocument, existing?: CanvasMetadata): CanvasMetadata {
-  return { schema_version: 2, title, trashed_at: existing?.trashed_at ?? null, summary: summarizeScene(scene), searchable_text: summarizeScene(scene).text_snippets.join(" ").slice(0, 4096), applied_proposals: existing?.applied_proposals ?? [] };
+  const summary = summarizeScene(scene);
+  return { schema_version: 2, title, trashed_at: existing?.trashed_at ?? null, summary, searchable_text: summary.text_snippets.join(" ").slice(0, 4096), applied_proposals: existing?.applied_proposals ?? [] };
 }
 function appendReceipt(metadata: CanvasMetadata, receipt: AppliedProposalReceipt): CanvasMetadata {
   if (metadata.applied_proposals.some((item) => item.proposal_id === receipt.proposal_id)) return metadata;

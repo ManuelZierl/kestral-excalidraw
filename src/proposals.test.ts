@@ -11,6 +11,11 @@ describe("canvas proposal validation", () => {
     expect(proposal.operations).toHaveLength(1);
   });
 
+  it("rejects undeclared envelope and payload fields", () => {
+    expect(() => validateProposalArtifact({ ...artifact(), content: { ...artifact().content, extra: true } }, appId, "canvases")).toThrow();
+    expect(() => validateProposalArtifact({ ...artifact(), content: { ...artifact().content, payload: { ...artifact().content.payload, extra: true } } }, appId, "canvases")).toThrow();
+  });
+
   it("refuses malformed, foreign, and replay-shaped proposal envelopes", () => {
     expect(() => validateProposalArtifact({ ...artifact(), content: { ...artifact().content as object, targetAppId: "other.app" } }, appId, "canvases")).toThrow(/target|revision/i);
     expect(() => validateProposalArtifact({ ...artifact(), content: { ...artifact().content as object, resourceId: "app-data:com.ma-zierl.kestral-excalidraw:canvases:document:not-a-uuid" } }, appId, "canvases")).toThrow(/resource/i);
