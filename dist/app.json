@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "id": "com.ma-zierl.kestral-excalidraw",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "display_name": "Whiteboard",
   "description": "A local multi-canvas Excalidraw whiteboard backed by Kestral managed documents.",
   "license": "MIT",
@@ -1994,7 +1994,7 @@
   "integrity": {
     "algorithm": "sha256",
     "assets": {
-      "ui/index.html": "sha256-fb71fbe02a09485f35d5a886acfdf209da3413bd38a82fc557a7f89e34e0bda4",
+      "ui/index.html": "sha256-ad68a2e6e020c1cd4d17d29f5575f3594f4ffecf432a682ffe9416c028abb7c3",
       "ui/LICENSE": "sha256-e1bfa23458196b672de194e91d149031aa42410d8a08a28ce51f6625b90cb48c",
       "ui/THIRD-PARTY-NOTICES.txt": "sha256-c4088b030017cb16b9bb4fd58634dab58436e07ab52125abf81cd9f3d9454fa1"
     }

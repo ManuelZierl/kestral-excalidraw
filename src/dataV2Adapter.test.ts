@@ -36,7 +36,29 @@ describe("data.v2 adapter", () => {
     const metadata: ManagedDocumentRecord = { id: "00000000-0000-4000-8000-000000000001", revision: 2, createdAt: "2026-08-05T00:00:00.000Z", updatedAt: "2026-08-05T00:00:00.000Z", metadata: {}, contentSha256: encoded.contentSha256, contentLength: encoded.bytes.byteLength };
     const loaded = await wire.adapter.readDocument("canvases", metadata, 1);
     expect(loaded.byteLength).toBe(encoded.bytes.byteLength);
-    expect(wire.readLengths.every((length) => length <= MAX_CHUNK_BYTES)).toBe(true);
+    const fullChunks = Math.floor(encoded.bytes.byteLength / MAX_CHUNK_BYTES);
+    const finalChunk = encoded.bytes.byteLength % MAX_CHUNK_BYTES;
+    expect(wire.readLengths).toEqual([
+      ...Array(fullChunks).fill(MAX_CHUNK_BYTES),
+      ...(finalChunk === 0 ? [] : [finalChunk]),
+    ]);
+  });
+
+  it("does not request content beyond a short document", async () => {
+    const encoded = await encodeDocument({ elements: [] });
+    const wire = new RecordingWire(encoded.bytes, encoded.contentSha256);
+    const metadata: ManagedDocumentRecord = { id: "00000000-0000-4000-8000-000000000001", revision: 2, createdAt: "2026-08-05T00:00:00.000Z", updatedAt: "2026-08-05T00:00:00.000Z", metadata: {}, contentSha256: encoded.contentSha256, contentLength: encoded.bytes.byteLength };
+    const loaded = await wire.adapter.readDocument("canvases", metadata, 1);
+    expect([...loaded]).toEqual([...encoded.bytes]);
+    expect(wire.readLengths).toEqual([encoded.bytes.byteLength]);
+  });
+
+  it("returns a valid empty document without requesting a chunk", async () => {
+    const emptyHash = "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const wire = new RecordingWire(new Uint8Array(), emptyHash);
+    const metadata: ManagedDocumentRecord = { id: "00000000-0000-4000-8000-000000000001", revision: 2, createdAt: "2026-08-05T00:00:00.000Z", updatedAt: "2026-08-05T00:00:00.000Z", metadata: {}, contentSha256: emptyHash, contentLength: 0 };
+    await expect(wire.adapter.readDocument("canvases", metadata, 1)).resolves.toEqual(new Uint8Array());
+    expect(wire.readLengths).toEqual([]);
   });
 
   it("rejects a snapshot whose returned generation differs from the request", async () => {
@@ -73,6 +95,9 @@ class RecordingWire {
         const read = request.reads[0];
         if (read.kind === "document-content") {
           this.readLengths.push(read.length);
+          if (read.length > MAX_CHUNK_BYTES || read.offset + read.length > this.content.byteLength) {
+            throw new Error(`managed-data document chunk must be at most ${MAX_CHUNK_BYTES} bytes and within the document`);
+          }
           const chunk = this.content.slice(read.offset, read.offset + read.length);
           return { generation: 1, results: [{ kind: "document-content", document: this.document(), offset: read.offset, contentBase64: toBase64(chunk), contentLength: this.content.byteLength }] };
         }

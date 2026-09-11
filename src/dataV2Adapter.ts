@@ -156,10 +156,11 @@ export class DataV2Adapter {
     }
     const bytes = new Uint8Array(document.contentLength);
     let offset = 0;
-    while (offset < document.contentLength || document.contentLength === 0) {
+    while (offset < document.contentLength) {
+      const length = Math.min(MAX_CHUNK_BYTES, document.contentLength - offset);
       const result = await this.readSnapshot({
         expectedGeneration,
-        reads: [{ kind: "document-content", collection, id: document.id, offset, length: MAX_CHUNK_BYTES }],
+        reads: [{ kind: "document-content", collection, id: document.id, offset, length }],
       });
       if (result.generation !== expectedGeneration) throw new DataV2ConflictError("Canvas changed while loading.");
       const item = result.results[0];
